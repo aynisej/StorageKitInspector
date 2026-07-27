@@ -1,0 +1,9 @@
+DerivedData/
+.build/
+dist/
+ExplorerExports/
+*.xcuserstate
+xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+.DS_Store
