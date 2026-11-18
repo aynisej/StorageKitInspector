@@ -2145,11 +2145,20 @@ func runCommandLine() {
 //======================================================
 
 final class StorageDashboard: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate {
+    private struct FileEntry {
+        let url: URL
+        let isDirectory: Bool
+        var size: Int64
+    }
+
     private var window: NSWindow!
     private let table = NSTableView()
-    private let pathLabel = NSTextField(labelWithString: "Выберите папку, чтобы увидеть самые крупные элементы")
+    private let pathLabel = NSTextField(labelWithString: "Выберите папку, чтобы просматривать файлы и папки")
     private let statusLabel = NSTextField(labelWithString: "Удаление отправляет выбранное в Корзину")
-    private var rows: [(url: URL, size: Int64)] = []
+    private var rows: [FileEntry] = []
+    private var currentDirectory: URL?
+    private var entriesByParent: [String: [FileEntry]] = [:]
+    private var sizeByPath: [String: Int64] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let root = NSView()
@@ -2158,20 +2167,27 @@ final class StorageDashboard: NSObject, NSApplicationDelegate, NSTableViewDataSo
         pathLabel.textColor = .secondaryLabelColor
         statusLabel.textColor = .secondaryLabelColor
         let open = NSButton(title: "Открыть папку…", target: self, action: #selector(chooseFolder))
+        let up = NSButton(title: "↑ Вверх", target: self, action: #selector(goUp))
+        let refresh = NSButton(title: "Обновить", target: self, action: #selector(refreshFolder))
         let delete = NSButton(title: "Переместить в Корзину", target: self, action: #selector(deleteSelected))
         let forceDelete = NSButton(title: "Завершить процессы и удалить навсегда…", target: self, action: #selector(forceDeleteSelected))
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
-        let nameCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name")); nameCol.title = "Файл или папка"; nameCol.width = 600
+        let nameCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name")); nameCol.title = "Имя"; nameCol.width = 520
+        let kindCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("kind")); kindCol.title = "Тип"; kindCol.width = 115
         let sizeCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("size")); sizeCol.title = "Размер"; sizeCol.width = 140
-        table.addTableColumn(nameCol); table.addTableColumn(sizeCol); table.delegate = self; table.dataSource = self
+        table.addTableColumn(nameCol); table.addTableColumn(kindCol); table.addTableColumn(sizeCol); table.delegate = self; table.dataSource = self
+        table.doubleAction = #selector(openSelectedDirectory)
+        table.target = self
         scroll.documentView = table
-        [title, pathLabel, open, scroll, delete, forceDelete, statusLabel].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; root.addSubview($0) }
+        [title, pathLabel, open, up, refresh, scroll, delete, forceDelete, statusLabel].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; root.addSubview($0) }
         NSLayoutConstraint.activate([
             title.topAnchor.constraint(equalTo: root.topAnchor, constant: 24), title.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 28),
             pathLabel.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8), pathLabel.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             open.topAnchor.constraint(equalTo: root.topAnchor, constant: 24), open.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -28),
-            scroll.topAnchor.constraint(equalTo: pathLabel.bottomAnchor, constant: 20), scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 28), scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -28), scroll.bottomAnchor.constraint(equalTo: delete.topAnchor, constant: -16),
+            up.topAnchor.constraint(equalTo: pathLabel.bottomAnchor, constant: 12), up.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            refresh.centerYAnchor.constraint(equalTo: up.centerYAnchor), refresh.leadingAnchor.constraint(equalTo: up.trailingAnchor, constant: 8),
+            scroll.topAnchor.constraint(equalTo: up.bottomAnchor, constant: 10), scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 28), scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -28), scroll.bottomAnchor.constraint(equalTo: delete.topAnchor, constant: -16),
             delete.leadingAnchor.constraint(equalTo: title.leadingAnchor), delete.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -12),
             forceDelete.leadingAnchor.constraint(equalTo: delete.trailingAnchor, constant: 12), forceDelete.centerYAnchor.constraint(equalTo: delete.centerYAnchor),
             statusLabel.leadingAnchor.constraint(equalTo: title.leadingAnchor), statusLabel.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -18)
@@ -2184,7 +2200,14 @@ final class StorageDashboard: NSObject, NSApplicationDelegate, NSTableViewDataSo
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let id = tableColumn!.identifier
-        let cell = NSTextField(labelWithString: id.rawValue == "name" ? rows[row].url.lastPathComponent : ByteCountFormatter.string(fromByteCount: rows[row].size, countStyle: .file))
+        let entry = rows[row]
+        let text: String
+        switch id.rawValue {
+        case "name": text = entry.url.lastPathComponent
+        case "kind": text = entry.isDirectory ? "Папка" : (entry.url.pathExtension.isEmpty ? "Файл" : entry.url.pathExtension.uppercased())
+        default: text = entry.isDirectory && entry.size == 0 ? "—" : ByteCountFormatter.string(fromByteCount: entry.size, countStyle: .file)
+        }
+        let cell = NSTextField(labelWithString: text)
         cell.lineBreakMode = .byTruncatingMiddle
         return cell
     }
@@ -2203,20 +2226,83 @@ final class StorageDashboard: NSObject, NSApplicationDelegate, NSTableViewDataSo
     @objc private func chooseFolder() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        pathLabel.stringValue = url.path; statusLabel.stringValue = "Сканирование…"
-        DispatchQueue.global(qos: .userInitiated).async {
-            let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .totalFileAllocatedSizeKey]
-            let children = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles])) ?? []
-            let found = children.map { item -> (URL, Int64) in
-                let values = try? item.resourceValues(forKeys: keys)
-                var size = Int64(values?.totalFileAllocatedSize ?? values?.fileSize ?? 0)
-                if values?.isDirectory == true, let enumerator = FileManager.default.enumerator(at: item, includingPropertiesForKeys: [.fileSizeKey, .totalFileAllocatedSizeKey], options: [.skipsHiddenFiles]) {
-                    for case let file as URL in enumerator { let v = try? file.resourceValues(forKeys: [.fileSizeKey, .totalFileAllocatedSizeKey]); size += Int64(v?.totalFileAllocatedSize ?? v?.fileSize ?? 0) }
-                }
-                return (item, size)
-            }.sorted { $0.1 > $1.1 }
-            DispatchQueue.main.async { self.rows = found; self.table.reloadData(); self.statusLabel.stringValue = "Найдено элементов: \(found.count) · для удаления используйте Корзину" }
+        loadFolder(url, forceRescan: false)
+    }
+
+    private func loadFolder(_ url: URL, forceRescan: Bool) {
+        currentDirectory = url.standardizedFileURL
+        pathLabel.stringValue = currentDirectory!.path
+        if !forceRescan, let cached = entriesByParent[currentDirectory!.path] {
+            showEntries(cached, cached: true)
+            return
         }
+        statusLabel.stringValue = "Первое сканирование папки… найденные файлы сохранятся в кэше"
+        let root = currentDirectory!
+        DispatchQueue.global(qos: .userInitiated).async {
+            var newEntries: [String: [FileEntry]] = [:]
+            var newSizes: [String: Int64] = [:]
+            var directories: [String] = []
+            var stack = [root]
+            let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .totalFileAllocatedSizeKey, .isSymbolicLinkKey]
+            while let directory = stack.popLast() {
+                let children = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: Array(keys), options: [])) ?? []
+                var entries: [FileEntry] = []
+                for item in children {
+                    guard let values = try? item.resourceValues(forKeys: keys) else { continue }
+                    let isDir = values.isDirectory == true && values.isSymbolicLink != true
+                    let size = Int64(values.totalFileAllocatedSize ?? values.fileSize ?? 0)
+                    newSizes[item.standardizedFileURL.path] = size
+                    entries.append(FileEntry(url: item, isDirectory: isDir, size: size))
+                    if isDir { directories.append(item.standardizedFileURL.path); stack.append(item) }
+                }
+                newEntries[directory.standardizedFileURL.path] = entries
+            }
+            // Fold child sizes into parent directory sizes, deepest folders first.
+            for path in directories.sorted(by: { $0.count > $1.count }) {
+                guard let children = newEntries[path] else { continue }
+                newSizes[path] = children.reduce(Int64(0)) { $0 + (newSizes[$1.url.standardizedFileURL.path] ?? $1.size) }
+            }
+            for key in newEntries.keys {
+                newEntries[key] = newEntries[key]?.map { entry in
+                    var updated = entry
+                    if entry.isDirectory { updated.size = newSizes[entry.url.standardizedFileURL.path] ?? 0 }
+                    return updated
+                }
+            }
+            DispatchQueue.main.async {
+                self.entriesByParent = newEntries
+                self.sizeByPath = newSizes
+                self.showEntries(newEntries[root.standardizedFileURL.path] ?? [], cached: false)
+            }
+        }
+    }
+
+    private func showEntries(_ entries: [FileEntry], cached: Bool) {
+        rows = entries.sorted {
+            if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
+            return $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending
+        }
+        table.reloadData()
+        statusLabel.stringValue = "Элементов: \(rows.count) · файлы и скрытые элементы показаны · \(cached ? "из кэша" : "сканирование завершено")"
+    }
+
+    @objc private func openSelectedDirectory() {
+        guard let index = table.clickedRow >= 0 ? table.clickedRow : Optional(table.selectedRow),
+              rows.indices.contains(index), rows[index].isDirectory else { return }
+        loadFolder(rows[index].url, forceRescan: false)
+    }
+
+    @objc private func goUp() {
+        guard let currentDirectory else { return }
+        let parent = currentDirectory.deletingLastPathComponent()
+        guard parent.path != currentDirectory.path else { return }
+        if entriesByParent[parent.path] != nil { loadFolder(parent, forceRescan: false) }
+        else { loadFolder(parent, forceRescan: false) }
+    }
+
+    @objc private func refreshFolder() {
+        guard let currentDirectory else { return }
+        loadFolder(currentDirectory, forceRescan: true)
     }
 
     @objc private func deleteSelected() {
@@ -2226,6 +2312,7 @@ final class StorageDashboard: NSObject, NSApplicationDelegate, NSTableViewDataSo
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         do {
             for index in indexes.sorted(by: >) { try FileManager.default.trashItem(at: rows[index].url, resultingItemURL: nil); rows.remove(at: index) }
+            entriesByParent.removeAll(); sizeByPath.removeAll()
             table.reloadData(); statusLabel.stringValue = "Готово. Элементы перемещены в Корзину."
         } catch { statusLabel.stringValue = "Не удалось удалить: \(error.localizedDescription)" }
     }
@@ -2284,6 +2371,7 @@ final class StorageDashboard: NSObject, NSApplicationDelegate, NSTableViewDataSo
                     }
                     for url in targets { try FileManager.default.removeItem(at: url) }
                     for index in indexes.sorted(by: >) { self.rows.remove(at: index) }
+                    self.entriesByParent.removeAll(); self.sizeByPath.removeAll()
                     self.table.reloadData(); self.statusLabel.stringValue = "Удалено навсегда; найденные пользовательские процессы завершены."
                 } catch { self.statusLabel.stringValue = "Ошибка удаления: \(error.localizedDescription)" }
             }
