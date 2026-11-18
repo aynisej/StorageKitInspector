@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import ObjectiveC.runtime
+import Darwin
 
 //======================================================
 // MARK: - StorageKit Runtime Explorer v4.1
@@ -2143,6 +2144,159 @@ func runCommandLine() {
 // MARK: - Main
 //======================================================
 
+final class StorageDashboard: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate {
+    private var window: NSWindow!
+    private let table = NSTableView()
+    private let pathLabel = NSTextField(labelWithString: "Выберите папку, чтобы увидеть самые крупные элементы")
+    private let statusLabel = NSTextField(labelWithString: "Удаление отправляет выбранное в Корзину")
+    private var rows: [(url: URL, size: Int64)] = []
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let root = NSView()
+        let title = NSTextField(labelWithString: "Хранилище")
+        title.font = .systemFont(ofSize: 26, weight: .bold)
+        pathLabel.textColor = .secondaryLabelColor
+        statusLabel.textColor = .secondaryLabelColor
+        let open = NSButton(title: "Открыть папку…", target: self, action: #selector(chooseFolder))
+        let delete = NSButton(title: "Переместить в Корзину", target: self, action: #selector(deleteSelected))
+        let forceDelete = NSButton(title: "Завершить процессы и удалить навсегда…", target: self, action: #selector(forceDeleteSelected))
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        let nameCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name")); nameCol.title = "Файл или папка"; nameCol.width = 600
+        let sizeCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("size")); sizeCol.title = "Размер"; sizeCol.width = 140
+        table.addTableColumn(nameCol); table.addTableColumn(sizeCol); table.delegate = self; table.dataSource = self
+        scroll.documentView = table
+        [title, pathLabel, open, scroll, delete, forceDelete, statusLabel].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; root.addSubview($0) }
+        NSLayoutConstraint.activate([
+            title.topAnchor.constraint(equalTo: root.topAnchor, constant: 24), title.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 28),
+            pathLabel.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8), pathLabel.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            open.topAnchor.constraint(equalTo: root.topAnchor, constant: 24), open.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -28),
+            scroll.topAnchor.constraint(equalTo: pathLabel.bottomAnchor, constant: 20), scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 28), scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -28), scroll.bottomAnchor.constraint(equalTo: delete.topAnchor, constant: -16),
+            delete.leadingAnchor.constraint(equalTo: title.leadingAnchor), delete.bottomAnchor.constraint(equalTo: statusLabel.topAnchor, constant: -12),
+            forceDelete.leadingAnchor.constraint(equalTo: delete.trailingAnchor, constant: 12), forceDelete.centerYAnchor.constraint(equalTo: delete.centerYAnchor),
+            statusLabel.leadingAnchor.constraint(equalTo: title.leadingAnchor), statusLabel.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -18)
+        ])
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 640), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.title = "Storage Inspector"; window.contentView = root; window.center(); window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let id = tableColumn!.identifier
+        let cell = NSTextField(labelWithString: id.rawValue == "name" ? rows[row].url.lastPathComponent : ByteCountFormatter.string(fromByteCount: rows[row].size, countStyle: .file))
+        cell.lineBreakMode = .byTruncatingMiddle
+        return cell
+    }
+
+    private func stillMatches(_ pid: Int32, processName: String) -> Bool {
+        let ps = Process(); ps.executableURL = URL(fileURLWithPath: "/bin/ps"); ps.arguments = ["-p", "\(pid)", "-o", "uid=,comm="]
+        let output = Pipe(); ps.standardOutput = output; ps.standardError = FileHandle.nullDevice
+        do {
+            try ps.run(); let data = output.fileHandleForReading.readDataToEndOfFile(); ps.waitUntilExit()
+            let parts = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).split(maxSplits: 1, whereSeparator: \.isWhitespace)
+            guard parts.count == 2, UInt32(parts[0]) == getuid() else { return false }
+            return URL(fileURLWithPath: String(parts[1])).lastPathComponent == processName
+        } catch { return false }
+    }
+
+    @objc private func chooseFolder() {
+        let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        pathLabel.stringValue = url.path; statusLabel.stringValue = "Сканирование…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .totalFileAllocatedSizeKey]
+            let children = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles])) ?? []
+            let found = children.map { item -> (URL, Int64) in
+                let values = try? item.resourceValues(forKeys: keys)
+                var size = Int64(values?.totalFileAllocatedSize ?? values?.fileSize ?? 0)
+                if values?.isDirectory == true, let enumerator = FileManager.default.enumerator(at: item, includingPropertiesForKeys: [.fileSizeKey, .totalFileAllocatedSizeKey], options: [.skipsHiddenFiles]) {
+                    for case let file as URL in enumerator { let v = try? file.resourceValues(forKeys: [.fileSizeKey, .totalFileAllocatedSizeKey]); size += Int64(v?.totalFileAllocatedSize ?? v?.fileSize ?? 0) }
+                }
+                return (item, size)
+            }.sorted { $0.1 > $1.1 }
+            DispatchQueue.main.async { self.rows = found; self.table.reloadData(); self.statusLabel.stringValue = "Найдено элементов: \(found.count) · для удаления используйте Корзину" }
+        }
+    }
+
+    @objc private func deleteSelected() {
+        let indexes = table.selectedRowIndexes
+        guard !indexes.isEmpty else { statusLabel.stringValue = "Сначала выберите файл или папку"; return }
+        let alert = NSAlert(); alert.messageText = "Переместить выбранное в Корзину?"; alert.informativeText = "Элементы можно будет восстановить из Корзины."; alert.alertStyle = .warning; alert.addButton(withTitle: "Переместить в Корзину"); alert.addButton(withTitle: "Отмена")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            for index in indexes.sorted(by: >) { try FileManager.default.trashItem(at: rows[index].url, resultingItemURL: nil); rows.remove(at: index) }
+            table.reloadData(); statusLabel.stringValue = "Готово. Элементы перемещены в Корзину."
+        } catch { statusLabel.stringValue = "Не удалось удалить: \(error.localizedDescription)" }
+    }
+
+    @objc private func forceDeleteSelected() {
+        let indexes = table.selectedRowIndexes
+        guard !indexes.isEmpty else { statusLabel.stringValue = "Сначала выберите файл или папку"; return }
+        let targets = indexes.map { rows[$0].url.standardizedFileURL }
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
+        let protected = ["/", "/System", "/Library", "/Applications", "/usr", "/bin", "/sbin", "/private", "/Volumes"]
+        guard targets.allSatisfy({ url in
+            let p = url.path
+            return p != home && p.hasPrefix(home + "/") && !protected.contains(where: { p == $0 || p.hasPrefix($0 + "/") })
+        }) else {
+            statusLabel.stringValue = "Необратимое удаление разрешено только для элементов внутри вашей домашней папки"
+            return
+        }
+
+        statusLabel.stringValue = "Поиск процессов, использующих выбранное…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            var pids = Set<Int32>()
+            for url in targets {
+                let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+                process.arguments = isDirectory ? ["-t", "+D", url.path] : ["-t", url.path]
+                let pipe = Pipe(); process.standardOutput = pipe; process.standardError = FileHandle.nullDevice
+                do { try process.run(); let data = pipe.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit();
+                    String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline).compactMap { Int32($0) }.forEach { pids.insert($0) }
+                } catch { }
+            }
+            let ownPID = getpid(); let ownUID = getuid()
+            let candidates: [(Int32, String)] = pids.compactMap { pid in
+                guard pid > 1, pid != ownPID else { return nil }
+                let ps = Process(); ps.executableURL = URL(fileURLWithPath: "/bin/ps"); ps.arguments = ["-p", "\(pid)", "-o", "uid=,comm="]
+                let output = Pipe(); ps.standardOutput = output; ps.standardError = FileHandle.nullDevice
+                do { try ps.run(); let data = output.fileHandleForReading.readDataToEndOfFile(); ps.waitUntilExit()
+                    let line = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let parts = line.split(maxSplits: 1, whereSeparator: \.isWhitespace)
+                    guard parts.count == 2, UInt32(parts[0]) == ownUID else { return nil }
+                    let executable = String(parts[1]); guard !executable.hasPrefix("/System/") && !executable.hasPrefix("/usr/libexec/") else { return nil }
+                    return (pid, URL(fileURLWithPath: executable).lastPathComponent)
+                } catch { return nil }
+            }.sorted { $0.0 < $1.0 }
+
+            DispatchQueue.main.async {
+                let list = candidates.isEmpty ? "Открытых файлов от пользовательских процессов не найдено." : candidates.map { "\($0.1) (PID \($0.0))" }.joined(separator: "\n")
+                let alert = NSAlert(); alert.messageText = "Удалить выбранное без возможности восстановления?"
+                alert.informativeText = "Будут отправлены SIGTERM, затем SIGKILL тем перечисленным пользовательским процессам, которые всё ещё работают. Все несохранённые данные этих приложений могут быть потеряны. После этого файлы будут удалены навсегда.\n\n\(list)"
+                alert.alertStyle = .critical; alert.addButton(withTitle: "Завершить процессы и удалить навсегда"); alert.addButton(withTitle: "Отмена")
+                guard alert.runModal() == .alertFirstButtonReturn else { self.statusLabel.stringValue = "Отменено"; return }
+                do {
+                    for (pid, _) in candidates { _ = Darwin.kill(pid, SIGTERM) }
+                    Thread.sleep(forTimeInterval: 1.0)
+                    for (pid, name) in candidates where self.stillMatches(pid, processName: name) {
+                        if Darwin.kill(pid, 0) == 0 { _ = Darwin.kill(pid, SIGKILL) }
+                    }
+                    for url in targets { try FileManager.default.removeItem(at: url) }
+                    for index in indexes.sorted(by: >) { self.rows.remove(at: index) }
+                    self.table.reloadData(); self.statusLabel.stringValue = "Удалено навсегда; найденные пользовательские процессы завершены."
+                } catch { self.statusLabel.stringValue = "Ошибка удаления: \(error.localizedDescription)" }
+            }
+        }
+    }
+}
+
+var storageDashboard: StorageDashboard?
+let cliArguments = Array(CommandLine.arguments.dropFirst())
+if cliArguments.isEmpty || cliArguments == ["--gui"] {
+    let app = NSApplication.shared; storageDashboard = StorageDashboard(); app.setActivationPolicy(.regular); app.delegate = storageDashboard; app.run()
+} else {
+
 banner("StorageKit Runtime Explorer v4.1")
 
 _ = loadFramework(
@@ -2160,3 +2314,4 @@ if shouldShowNativeGUI {
 }
 
 banner("Done")
+}

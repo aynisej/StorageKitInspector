@@ -2,23 +2,22 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-PROJECT_PATH="$ROOT_DIR/StorageKitInspector.xcodeproj"
-DERIVED_DATA_PATH="$ROOT_DIR/.build/DerivedData"
-PRODUCTS_DIR="$DERIVED_DATA_PATH/Build/Products/Release"
-EXECUTABLE_PATH="$PRODUCTS_DIR/StorageKitInspector"
+BUILD_DIR="$ROOT_DIR/.build"
+EXECUTABLE_PATH="$BUILD_DIR/StorageKitInspector"
 APP_DIR="$ROOT_DIR/dist/StorageKitInspector.app"
+ARCHIVE_PATH="$ROOT_DIR/dist/StorageKitInspector-macOS-arm64.zip"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
+VERSION="1.0.0"
 
-xcodebuild \
-    -project "$PROJECT_PATH" \
-    -scheme StorageKitInspector \
-    -configuration Release \
-    -derivedDataPath "$DERIVED_DATA_PATH" \
-    build
+mkdir -p "$BUILD_DIR" "$ROOT_DIR/dist"
+swiftc -O "$ROOT_DIR/StorageKitInspector/main.swift" \
+    -target arm64-apple-macosx14.0 \
+    -framework AppKit \
+    -o "$EXECUTABLE_PATH"
 
-rm -rf "$APP_DIR"
+rm -rf "$APP_DIR" "$ARCHIVE_PATH"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$EXECUTABLE_PATH" "$MACOS_DIR/StorageKitInspector"
 chmod +x "$MACOS_DIR/StorageKitInspector"
@@ -41,9 +40,11 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>$VERSION</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
@@ -52,4 +53,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+codesign --force --deep --sign - "$APP_DIR"
+ditto -c -k --keepParent "$APP_DIR" "$ARCHIVE_PATH"
+
 echo "Created $APP_DIR"
+echo "Created $ARCHIVE_PATH"

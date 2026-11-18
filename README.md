@@ -1,6 +1,8 @@
 # StorageKitInspector
 
-StorageKitInspector is a macOS StorageKit runtime research tool with a native AppKit report viewer.
+StorageKitInspector is a macOS storage browser and StorageKit runtime research tool.
+
+The default app window lets you choose a folder, sort its immediate contents by their recursively calculated size, and move selected items to the macOS Trash. Command-line scenarios continue to inspect StorageKit runtime objects and export reports.
 
 It explores selected private StorageKit object graphs, records discovered classes and relationships, and exports JSON reports for later analysis.
 
@@ -16,34 +18,29 @@ It is intended for local research and diagnostics. It is not suitable for App St
 ## Requirements
 
 - macOS
-- Xcode
+- Swift 6.4 or newer (Xcode Command Line Tools are sufficient)
 
 ## Build
 
-Open `StorageKitInspector.xcodeproj` in Xcode and build the `StorageKitInspector` scheme.
-
-From the command line:
-
-```sh
-xcodebuild -project StorageKitInspector.xcodeproj -scheme StorageKitInspector -configuration Release build
-```
-
-Build a `.app` bundle for GitHub Releases:
+Build a macOS arm64 `.app` bundle and ZIP archive:
 
 ```sh
 chmod +x Scripts/package-app.sh
 Scripts/package-app.sh
 ```
 
-The bundle is created at:
+The bundle and release archive are created at:
 
 ```text
 dist/StorageKitInspector.app
+dist/StorageKitInspector-macOS-arm64.zip
 ```
+
+The app bundle is ad-hoc signed and is not notarized. macOS may require opening it from Finder with Control-click → Open the first time.
 
 ## Run
 
-The default run mode explores disk-related StorageKit objects and opens the native GUI:
+Launch the app UI by running the executable without arguments:
 
 ```sh
 StorageKitInspector
@@ -82,7 +79,7 @@ Scenario runs write reports into `ExplorerExports/`:
 - `<scenario>-report.json`
 - `<scenario>-report.html`
 
-The native GUI shows the same data in tabs:
+The research report GUI shows the same data in tabs:
 
 - Summary
 - Classes
@@ -93,3 +90,5 @@ The native GUI shows the same data in tabs:
 ## Safety
 
 The explorer intentionally avoids mutating selectors and blocks known unstable Foundation/runtime paths during automated traversal. It also restricts recursive object exploration to StorageKit-related class prefixes.
+
+The storage browser sends ordinary deletions to Trash and asks for confirmation. It also offers an explicitly irreversible action for items inside the current user's home folder: it lists processes reported by `lsof`, sends `SIGTERM`, escalates still-running matching user processes to `SIGKILL`, then permanently removes the selected items. System-owned and protected paths are excluded. Forced termination can lose unsaved work.
