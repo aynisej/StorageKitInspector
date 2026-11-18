@@ -22,7 +22,7 @@ It is intended for local research and diagnostics. It is not suitable for App St
 
 ## Build
 
-Build a macOS arm64 `.app` bundle and ZIP archive:
+Build a macOS arm64 `.app` bundle, drag-and-drop DMG, and ZIP archive:
 
 ```sh
 chmod +x Scripts/package-app.sh
@@ -33,8 +33,11 @@ The bundle and release archive are created at:
 
 ```text
 dist/StorageKitInspector.app
+dist/StorageKitInspector-macOS-arm64.dmg
 dist/StorageKitInspector-macOS-arm64.zip
 ```
+
+To install from the DMG, open it and drag `StorageKitInspector.app` onto the Applications shortcut.
 
 The app bundle is ad-hoc signed and is not notarized. macOS may require opening it from Finder with Control-click → Open the first time.
 

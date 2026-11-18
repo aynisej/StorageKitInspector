@@ -7,4 +7,4 @@ First macOS arm64 application release.
 - Keep the StorageKit runtime research scenarios and report exports available from the command line.
 
 ### Install
-Download and unzip `StorageKitInspector-macOS-arm64.zip`, then move `StorageKitInspector.app` to Applications. The app is ad-hoc signed and not notarized; macOS may require Control-click → Open the first time.
+Download `StorageKitInspector-macOS-arm64.dmg`, open it, and drag `StorageKitInspector.app` to Applications. The ZIP archive is also available. The app is ad-hoc signed and not notarized; macOS may require Control-click → Open the first time.

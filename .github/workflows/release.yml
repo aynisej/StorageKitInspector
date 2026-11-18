@@ -24,6 +24,7 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             dist/StorageKitInspector-macOS-arm64.zip \
+            dist/StorageKitInspector-macOS-arm64.dmg \
             --repo "${GITHUB_REPOSITORY}" \
             --title "Storage Inspector ${GITHUB_REF_NAME}" \
             --notes-file .github/RELEASE_NOTES.md \
